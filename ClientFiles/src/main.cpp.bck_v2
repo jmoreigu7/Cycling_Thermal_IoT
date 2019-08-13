@@ -1,0 +1,685 @@
+#include <stdio.h>
+#include <stdlib.h>
+#define _XOPEN_SOURCE_EXTENDED 1
+#include <string.h>
+#include <iostream>
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Adafruit_TCS34725.h>
+#include <Adafruit_MAX31856.h>
+#include <mySD.h>
+
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+
+#include <iostream>
+#include <iomanip>
+#include <cmath>
+
+File root;
+File pass;
+String buffer;
+String baffer;
+
+char char_ssid[20]; 
+char char_pass[20]; 
+
+#define RELAY_DC3_FAN                   25
+#define RELAY_AC4_FAN2                  26
+#define RELAY_AC5_MUFLA                 27
+#define RELAY_DC1_GENERAL               32
+#define RELAY_DC2_AIR                   33
+#define MOTOR_STEP                      00
+#define MOTOR_DIR                       04
+#define SPI_CLK_TC                      14
+#define SPI_MISO_TC                     12
+#define SPI_MOSI_TC                     13
+#define SPI_MAX1                        17
+#define SPI_MAX2                        16
+#define SPI_MAX3                        02
+#define SPI_MAX4                        15
+#define SPI_CS_SD                       05
+#define SPI_CLK_SD                      18
+#define SPI_MOSI_SD                     23
+#define SPI_MISO_SD                     19
+#define I2C_SCL                         22
+#define I2C_SDA                         21
+#define ON                              0x0
+#define OFF                             0x1
+#define MOTOR_UP                        0x1
+#define MOTOR_DOWN                      0x0
+
+const char* host = "tesmaterials.com";    // hostname and php file that we use in interface
+const char* insert = "insert.php";
+const char* select_comlink = "select_comlink.php";
+const char* parameters = "parameters.php";
+const char* update_comm = "update_commands.php";
+const char* credential = "credential.php";
+
+char buf_f1[10], buf_f2[10], buf_f3[10], buf_f4[10];  // use that buffers to save floats in charactesrs with "gcvt" function
+
+// to clean up those variables, because many of them are useless
+int int_id_comm, int_commands, int_data_comm, int_execute, int_response, int_user, int_pass;
+int int_id_param, int_status_param, int_total_cycles, int_performed_cycles, int_t_max_cycles, int_t_min_cycles, int_t_max_hf, int_t_min_hf, int_t_max_cu;
+int int_t4_max, int_t4_min, int_tub_position, int_tub_time_limit, int_sampling_time, int_moving_speed, int_rgb_max_white, int_rgb_min_white, int_rgb_max_black, int_rgb_min_black;
+int int_rgb_max_color, int_rgb_min_color, int_furnance_power, int_fan_status, int_air_pump, int_motor_small_step;
+int int_fan2_status, int_general_status; // FALTAN EN LA DB!!!
+// table commands
+char id[20], commands[20], data_comm[20], execute[20], response[20];
+// table parameters
+char id_param[20], status_param[20], total_cycles[20], performed_cycles[20], t_max_cycles[20], t_min_cycles[20], t_max_hf[20], t_min_hf[20], t_max_cu[20];
+char t4_max[20], t4_min[20], tub_position[20], tub_time_limit[20], sampling_time[20], moving_speed[20], rgb_max_white[20], rgb_min_white[20], rgb_max_black[20], rgb_min_black[20];
+char rgb_max_color[20], rgb_min_color[20], furnance_power[20], fan_status[20], air_pump[20], motor_small_step[20];
+
+typedef enum{
+    S_CYCLE                 = 1,
+    S_WARMING               = 2,
+    S_COOLING               = 3,
+    S_END_OF_CYCLE          = 4,
+    S_PAUSA                 = 5,
+    S_CONTINUAR             = 6,
+}states_t;
+
+/* RGB & MAX*/
+float f_colorTemp, f_lux;
+float f_red, f_green, f_blue;
+float f_temp1, f_temp2, f_temp3, f_temp4;
+int int_cycle;
+// LCD
+
+// SPI: CS(1,2,3,4), MOSI, MISO, CLK
+Adafruit_MAX31856 maxthermo1  = Adafruit_MAX31856(SPI_MAX1, SPI_MOSI_TC, SPI_MISO_TC, SPI_CLK_TC);
+Adafruit_MAX31856 maxthermo2  = Adafruit_MAX31856(SPI_MAX2, SPI_MOSI_TC, SPI_MISO_TC, SPI_CLK_TC);
+Adafruit_MAX31856 maxthermo3  = Adafruit_MAX31856(SPI_MAX3, SPI_MOSI_TC, SPI_MISO_TC, SPI_CLK_TC);
+Adafruit_MAX31856 maxthermo4  = Adafruit_MAX31856(SPI_MAX4, SPI_MOSI_TC, SPI_MISO_TC, SPI_CLK_TC);
+Adafruit_TCS34725 tcs         = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+/* Functions */
+void step(int steps, int servodelay, boolean direccion){
+  digitalWrite(MOTOR_DIR,direccion);
+  for(int i=0;i<steps;i++){
+    digitalWrite(MOTOR_STEP, HIGH);
+    delayMicroseconds(servodelay);
+    digitalWrite(MOTOR_STEP, LOW);
+    delayMicroseconds(servodelay);
+  }
+}
+
+void 
+motor_stepper(int steps, int servodelay, boolean direccion){
+  pinMode(MOTOR_STEP,OUTPUT);
+  pinMode(MOTOR_DIR, OUTPUT);
+  step(steps, servodelay, direccion);
+}
+  // motor - FUNCIONA!
+  // pinMode(MOTOR_STEP, OUTPUT);
+  // pinMode(MOTOR_DIR, OUTPUT);
+  // step(16500, 400, true);  // min 400 us
+  // step(16500, 400, false);
+
+void general(uint8_t on_off){
+  if(on_off = ON){
+    pinMode(RELAY_DC1_GENERAL, OUTPUT);
+    digitalWrite(RELAY_DC1_GENERAL, on_off);
+    int_general_status = 1;
+  }else{
+    pinMode(RELAY_DC1_GENERAL, OUTPUT);
+    digitalWrite(RELAY_DC1_GENERAL, on_off);
+    int_general_status = 1;
+  }
+}
+void air(uint8_t on_off){
+  if(on_off = ON){
+    pinMode(RELAY_DC2_AIR, OUTPUT);
+    digitalWrite(RELAY_DC2_AIR, on_off);
+    int_air_pump = 1;
+  }else{
+    pinMode(RELAY_DC2_AIR, OUTPUT);
+    digitalWrite(RELAY_DC2_AIR, on_off);
+    int_air_pump = 0;
+  }
+}
+void fan1(uint8_t on_off){
+  if(on_off = ON){
+    pinMode(RELAY_DC3_FAN, OUTPUT);
+    digitalWrite(RELAY_DC3_FAN, on_off);
+    int_fan_status = 1;
+  }else{
+    pinMode(RELAY_DC3_FAN, OUTPUT);
+    digitalWrite(RELAY_DC3_FAN, on_off);
+    int_fan_status = 1;
+  }
+}
+void fan2(uint8_t on_off){
+  if(on_off = ON){
+    pinMode(RELAY_AC4_FAN2, OUTPUT);
+    digitalWrite(RELAY_AC4_FAN2, on_off);
+    int_fan2_status = 1;
+  }else{
+    pinMode(RELAY_AC4_FAN2, OUTPUT);
+    digitalWrite(RELAY_AC4_FAN2, on_off);
+    int_fan2_status = 0;
+  }
+}
+void mufla(uint8_t on_off){
+  if(on_off = ON){
+    pinMode(RELAY_AC5_MUFLA, OUTPUT);
+    digitalWrite(RELAY_AC5_MUFLA, on_off);
+    int_furnance_power = 1;
+  }else{
+    pinMode(RELAY_AC5_MUFLA, OUTPUT);
+    digitalWrite(RELAY_AC5_MUFLA, on_off);
+    int_furnance_power = 0;
+  }  
+}
+
+void printDirectory(File dir, int numTabs){
+  while(true) {
+     File entry =  dir.openNextFile();
+     if(! entry){
+       break;
+     }
+     for(uint8_t i=0; i<numTabs; i++){
+       Serial.print('\t');   // we'll have a nice indentation
+     }
+     // Print the name
+     Serial.print(entry.name());
+     /* Recurse for directories, otherwise print the file size */
+     if(entry.isDirectory()){
+       Serial.println("/");
+       printDirectory(entry, numTabs+1);
+     }else{
+       /* files have sizes, directories do not */
+       Serial.print("\t\t");
+       Serial.println(entry.size());
+     }
+     entry.close();
+   }
+}
+// Check and print any faults
+void faults(){
+  uint8_t fault1 = maxthermo1.readFault();  uint8_t fault2 = maxthermo2.readFault(); uint8_t fault3 = maxthermo3.readFault(); uint8_t fault4 = maxthermo4.readFault();
+  if (fault1) {
+    if (fault1 & MAX31856_FAULT_CJRANGE) Serial.println("[INFO] #1 Cold Junction Range Fault");  if (fault1 & MAX31856_FAULT_TCRANGE) Serial.println("[INFO] #1 Thermocouple Range Fault");
+    if (fault1 & MAX31856_FAULT_CJHIGH)  Serial.println("[INFO] #1 Cold Junction High Fault");   if (fault1 & MAX31856_FAULT_CJLOW)   Serial.println("[INFO] #1 Cold Junction Low Fault");
+    if (fault1 & MAX31856_FAULT_TCHIGH)  Serial.println("[INFO] #1 Thermocouple High Fault");    if (fault1 & MAX31856_FAULT_TCLOW)   Serial.println("[INFO] #1 Thermocouple Low Fault");
+    if (fault1 & MAX31856_FAULT_OVUV)    Serial.println("[INFO] #1 Over/Under Voltage Fault");   if (fault1 & MAX31856_FAULT_OPEN)    Serial.println("[INFO] #1 Thermocouple Open Fault");
+    // while(1); //halt!
+  }
+  if (fault2) {
+    if (fault2 & MAX31856_FAULT_CJRANGE) Serial.println("[INFO] #2 Cold Junction Range Fault");  if (fault2 & MAX31856_FAULT_TCRANGE) Serial.println("[INFO] #2 Thermocouple Range Fault");
+    if (fault2 & MAX31856_FAULT_CJHIGH)  Serial.println("[INFO] #2 Cold Junction High Fault");   if (fault2 & MAX31856_FAULT_CJLOW)   Serial.println("[INFO] #2 Cold Junction Low Fault");
+    if (fault2 & MAX31856_FAULT_TCHIGH)  Serial.println("[INFO] #2 Thermocouple High Fault");    if (fault2 & MAX31856_FAULT_TCLOW)   Serial.println("[INFO] #2 Thermocouple Low Fault");
+    if (fault2 & MAX31856_FAULT_OVUV)    Serial.println("[INFO] #2 Over/Under Voltage Fault");   if (fault2 & MAX31856_FAULT_OPEN)    Serial.println("[INFO] #2 Thermocouple Open Fault");
+    // while(1); // halt!
+  }
+  if (fault3) {
+    if (fault3 & MAX31856_FAULT_CJRANGE) Serial.println("[INFO] #3 Cold Junction Range Fault");  if (fault3 & MAX31856_FAULT_TCRANGE) Serial.println("[INFO] #3 Thermocouple Range Fault");
+    if (fault3 & MAX31856_FAULT_CJHIGH)  Serial.println("[INFO] #3 Cold Junction High Fault");   if (fault3 & MAX31856_FAULT_CJLOW)   Serial.println("[INFO] #3 Cold Junction Low Fault");
+    if (fault3 & MAX31856_FAULT_TCHIGH)  Serial.println("[INFO] #3 Thermocouple High Fault");    if (fault3 & MAX31856_FAULT_TCLOW)   Serial.println("[INFO] #3 Thermocouple Low Fault");
+    if (fault3 & MAX31856_FAULT_OVUV)    Serial.println("[INFO] #3 Over/Under Voltage Fault");   if (fault3 & MAX31856_FAULT_OPEN)    Serial.println("[INFO] #3 Thermocouple Open Fault");
+    // while(1); // halt!
+  }
+  if (fault4) {
+    if (fault4 & MAX31856_FAULT_CJRANGE) Serial.println("[INFO] #4 Cold Junction Range Fault");  if (fault4 & MAX31856_FAULT_TCRANGE) Serial.println("[INFO] #4 Thermocouple Range Fault");
+    if (fault4 & MAX31856_FAULT_CJHIGH)  Serial.println("[INFO] #4 Cold Junction High Fault");   if (fault4 & MAX31856_FAULT_CJLOW)   Serial.println("[INFO] #4 Cold Junction Low Fault");
+    if (fault4 & MAX31856_FAULT_TCHIGH)  Serial.println("[INFO] #4 Thermocouple High Fault");    if (fault4 & MAX31856_FAULT_TCLOW)   Serial.println("[INFO] #4 Thermocouple Low Fault");
+    if (fault4 & MAX31856_FAULT_OVUV)    Serial.println("[INFO] #4 Over/Under Voltage Fault");   if (fault4 & MAX31856_FAULT_OPEN)    Serial.println("[INFO] #4 Thermocouple Open Fault"); // circuito abierto
+    // while(1); // halt!
+  }
+}
+
+void max_begin(){
+  maxthermo1.begin(); maxthermo2.begin(); maxthermo3.begin(); maxthermo4.begin();
+  maxthermo1.setThermocoupleType(MAX31856_TCTYPE_K);
+  Serial.print("[SUCCESS] Thermocouple #1 type: ");
+  switch (maxthermo1.getThermocoupleType()){
+    case MAX31856_TCTYPE_B: Serial.println("B Type"); break;  case MAX31856_TCTYPE_E: Serial.println("E Type"); break;
+    case MAX31856_TCTYPE_J: Serial.println("J Type"); break;  case MAX31856_TCTYPE_K: Serial.println("K Type"); break;
+    case MAX31856_TCTYPE_N: Serial.println("N Type"); break;  case MAX31856_TCTYPE_R: Serial.println("R Type"); break;
+    case MAX31856_TCTYPE_S: Serial.println("S Type"); break;  case MAX31856_TCTYPE_T: Serial.println("T Type"); break;
+    case MAX31856_VMODE_G8: Serial.println("Voltage x8 Gain mode"); break;  case MAX31856_VMODE_G32: Serial.println("Voltage x8 Gain mode"); break;
+    default: Serial.println("Unknown"); break;
+  }
+  Serial.print("[SUCCESS] Thermocouple #2 type: ");
+  switch (maxthermo2.getThermocoupleType()){
+    case MAX31856_TCTYPE_B: Serial.println("B Type"); break;  case MAX31856_TCTYPE_E: Serial.println("E Type"); break;
+    case MAX31856_TCTYPE_J: Serial.println("J Type"); break;  case MAX31856_TCTYPE_K: Serial.println("K Type"); break;
+    case MAX31856_TCTYPE_N: Serial.println("N Type"); break;  case MAX31856_TCTYPE_R: Serial.println("R Type"); break;
+    case MAX31856_TCTYPE_S: Serial.println("S Type"); break;  case MAX31856_TCTYPE_T: Serial.println("T Type"); break;
+    case MAX31856_VMODE_G8: Serial.println("Voltage x8 Gain mode"); break;  case MAX31856_VMODE_G32: Serial.println("Voltage x8 Gain mode"); break;
+    default: Serial.println("Unknown"); break;
+  }
+  Serial.print("[SUCCESS] Thermocouple #3 type: ");
+  switch (maxthermo3.getThermocoupleType()){
+    case MAX31856_TCTYPE_B: Serial.println("B Type"); break;  case MAX31856_TCTYPE_E: Serial.println("E Type"); break;
+    case MAX31856_TCTYPE_J: Serial.println("J Type"); break;  case MAX31856_TCTYPE_K: Serial.println("K Type"); break;
+    case MAX31856_TCTYPE_N: Serial.println("N Type"); break;  case MAX31856_TCTYPE_R: Serial.println("R Type"); break;
+    case MAX31856_TCTYPE_S: Serial.println("S Type"); break;  case MAX31856_TCTYPE_T: Serial.println("T Type"); break;
+    case MAX31856_VMODE_G8: Serial.println("Voltage x8 Gain mode"); break;  case MAX31856_VMODE_G32: Serial.println("Voltage x8 Gain mode"); break;
+    default: Serial.println("Unknown"); break;
+  }
+  Serial.print("[SUCCESS] Thermocouple #4 type: ");
+  switch (maxthermo4.getThermocoupleType()){
+    case MAX31856_TCTYPE_B: Serial.println("B Type"); break;  case MAX31856_TCTYPE_E: Serial.println("E Type"); break;
+    case MAX31856_TCTYPE_J: Serial.println("J Type"); break;  case MAX31856_TCTYPE_K: Serial.println("K Type"); break;
+    case MAX31856_TCTYPE_N: Serial.println("N Type"); break;  case MAX31856_TCTYPE_R: Serial.println("R Type"); break;
+    case MAX31856_TCTYPE_S: Serial.println("S Type"); break;  case MAX31856_TCTYPE_T: Serial.println("T Type"); break;
+    case MAX31856_VMODE_G8: Serial.println("Voltage x8 Gain mode"); break;  case MAX31856_VMODE_G32: Serial.println("Voltage x8 Gain mode"); break;
+    default: Serial.println("Unknown"); break;
+  }
+}
+
+void setup(){
+  Serial.begin(115200); // BaudRate
+  Serial.println("Welcome to UB Thermal Stress Program");
+  delay(100);
+  Serial.println("Start Checking devices");
+  /* LCD */
+  
+  /* RGB Sensor-TCS34725 */
+  Serial.println("Check RGB Sensor...");
+  if(tcs.begin()){
+    Serial.println("[SUCCESS] RGB Sensor-TCS34725 detected");
+  }else{
+    Serial.println("[ERROR] No found RGB Sensor-TCS34725");
+    // while(1); // halt! muere!
+  }
+  delay(100);
+  /* microSD - HC4050M*/
+  Serial.println("Check SD card...");
+  if (!SD.begin(SPI_CS_SD, SPI_MOSI_SD, SPI_MISO_SD, SPI_CLK_SD)) {
+    Serial.println("[ERROR] SD initialization failed!");
+    return;
+  }else{ 
+    Serial.println("[SUCCESS] SD detected");
+  }
+  delay(100);
+  /* Thermocouple Amplifier MAX31865 */
+  Serial.println("Check MAX31856's...");
+  max_begin();
+  faults();
+  /* open files for writing&reading */
+  root = SD.open("SSID", FILE_WRITE);
+  pass = SD.open("PSWD", FILE_WRITE);
+  /* Read credentials */ 
+  delay(100);
+  root = SD.open("SSID");
+  if (root) {    
+    while (root.available()) {
+      root.readStringUntil('&');
+      buffer = root.readStringUntil(';');
+      root.read();
+    }
+    root.close(); // podemos borrar aqui los archivos
+  } else {
+    Serial.println("[ERROR] can't read SSID");
+  }
+  pass = SD.open("PSWD");
+  if (pass) {    
+    while (pass.available()) {
+      pass.readStringUntil('&');
+      baffer = pass.readStringUntil(';');
+      pass.readStringUntil('\n');
+    }
+    pass.close();
+  } else {
+    Serial.println("[ERROR] can't read PASS");
+  }
+  // copying the contents of the string to char array 
+  strcpy(char_ssid, buffer.c_str()); 
+  strcpy(char_pass, baffer.c_str()); 
+  // FALTA UNA COMPROBACION DEL MOTOR
+  // Se podria hacer que si RGB = X en t=0
+  // mover el motor hacia otra franja y ver que RGB != X
+  motor_stepper(500, 400, true);
+  motor_stepper(500, 400, false);
+
+  Serial.println("Check WIFI connection...");
+  Serial.print("Connecting to Network:"); Serial.print(char_ssid);
+  WiFi.begin(char_ssid, char_pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("[SUCCESS] Connected to the WIFI network!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println("Finish the setup, all sensor are running"); 
+  int_cycle = 0;
+}
+
+// The commented out code in loop is example of getRawData with clear value.
+// Processing example colorview.pde can work with this kind of data too, but It requires manual conversion to
+// [0-255] RGB value. You can still uncomments parts of colorview.pde and play with clear value.
+void loop(){
+  /* READ TH */
+  f_temp1 = maxthermo1.readThermocoupleTemperature(); sprintf(buf_f1, "%f", f_temp1); // gcvt(temp1, 7, buf_f1); // it's not a error
+  f_temp2 = maxthermo2.readThermocoupleTemperature(); sprintf(buf_f2, "%f", f_temp2); // gcvt(temp2, 7, buf_f2);
+  f_temp3 = maxthermo3.readThermocoupleTemperature(); sprintf(buf_f3, "%f", f_temp3); // gcvt(temp3, 7, buf_f3);
+  f_temp4 = maxthermo4.readThermocoupleTemperature(); sprintf(buf_f4, "%f", f_temp4); // gcvt(temp4, 7, buf_f4);
+  /* HTTP */
+  Serial.print("Let's get to work! We start by connecting to the host: ");
+  Serial.println(host);
+  /* Wifi Client class to create TCP connections */
+  WiFiClient clientReadCommands;            // cliente para la lectura de los commandos antes del buclue
+  WiFiClient clientReadCommandAlways;       // cliente para la lectura de los comandos siempre que no este un estado definido
+  WiFiClient clientReadParameters;          // cliente para leer y establecer los parametros/variables de control
+  WiFiClient clientInsertTemp;                    // cliente para
+  WiFiClient clientWakeParam;
+  WiFiClient client4;                       // cliente para
+  const int httpPort = 80;                  // Port 80 - HTTP/TCP
+  if (!clientReadCommands.connect(host, httpPort)){ Serial.println("connection to COMMANDS failed"); return; }
+  if (!clientReadCommandAlways.connect(host, httpPort)){ Serial.println("connection to blablabla failed"); return; }
+  if (!clientReadParameters.connect(host, httpPort)){ Serial.println("connection to blablabla failed"); return;}
+  if (!clientInsertTemp.connect(host, httpPort)){ Serial.println("connection to blablabla failed"); return; }
+  if (!clientWakeParam.connect(host, httpPort)){ Serial.println("connection to blablabla failed"); return; }
+  if (!client4.connect(host, httpPort)){ Serial.println("connection to blablabla failed"); return; }
+  Serial.println("[INFO] ESTOY FUERA DEL WHILE"); 
+  String s_ReadCommands = "/ciclado/"; s_ReadCommands += select_comlink; 
+  s_ReadCommands += "?usr=tesmater_cicla01&pwd=Diopma2203*"; s_ReadCommands += "&select=commands";
+  s_ReadCommands += "&query=SELECT%20*%20FROM%20tesmater_ciclado01.commands";
+  Serial.print("Requesting URL: ");Serial.println(s_ReadCommands);
+  /* Read DB.COMMANDS  */ 
+  clientReadCommands.print(String("GET ") + s_ReadCommands + " HTTP/1.1\r\n" +
+                "Host: " + host + "\r\n" +
+                "Connection: close\r\n\r\n");
+  unsigned long timeoutReadCommands = millis();
+  while (clientReadCommands.available() == 0) {
+    if (millis() - timeoutReadCommands > 5000) {
+      Serial.println(">>> Client Timeout !");
+      clientReadCommands.stop();
+      return;
+    }
+  }
+  while(clientReadCommands.available()) {
+    clientReadCommands.readStringUntil('&'); // (&) inicio
+    Serial.print("ID Command: ");       int_id_comm = clientReadCommands.readStringUntil(';').toInt();    Serial.println(int_id_comm);
+    Serial.print("Status Command: ");   String s_command = clientReadCommands.readStringUntil(';');       Serial.println(s_command);
+    Serial.print("Data of Command: ");  String s_data_command = clientReadCommands.readStringUntil(';');  Serial.println(s_data_command);
+    Serial.print("Executed: ");         String s_info_execute = clientReadCommands.readStringUntil(';');  Serial.println(s_info_execute);
+    Serial.print("Response: ");         String s_info_response = clientReadCommands.readStringUntil('!'); Serial.println(s_info_response); // (!) fin
+    Serial.print("\n");
+    clientReadCommands.stop();
+  }
+  Serial.println("[INFO] ESTOY APUNTO DE ENTRAR AL WHILE");
+  /* EL USUARIO HA MANDADO UNA ORDEN */
+  while(int_id_comm!=0){ // POSIBLEMENTE SEA MEJOR HACER QUE ENTRE CUANDO int_id_comm = 1;
+    // LEER LOS PARAMETROS Y REFRESCAR VALORES
+    Serial.println("[INFO] ESTOY DENTRO DEL WHILE");
+    Serial.println("[INFO] VOY A LEER LOS COMANDOS POR SI HAN CAMBIADO"); // NECESARIO!!!
+    clientReadCommandAlways.print(String("GET ") + s_ReadCommands + " HTTP/1.1\r\n" +
+                  "Host: " + host + "\r\n" +
+                  "Connection: close\r\n\r\n");
+    unsigned long timeoutReadCommandsAllways = millis();
+    while (clientReadCommandAlways.available() == 0) {
+      if (millis() - timeoutReadCommandsAllways > 5000) {
+        Serial.println(">>> Client Timeout !");
+        clientReadCommandAlways.stop();
+        return;
+      }
+    }
+    while(clientReadCommandAlways.available()) {
+      clientReadCommandAlways.readStringUntil('&'); // (&) inicio
+      Serial.print("ID Command: ");      int_id_comm = clientReadCommandAlways.readStringUntil(';').toInt();    Serial.println(int_id_comm);
+      Serial.print("Status Command: ");  String s_command = clientReadCommandAlways.readStringUntil(';');       Serial.println(s_command);
+      Serial.print("Data of Command: "); String s_data_command = clientReadCommandAlways.readStringUntil(';');  Serial.println(s_data_command);
+      Serial.print("Executed: ");        String s_info_execute = clientReadCommandAlways.readStringUntil(';');  Serial.println(s_info_execute);
+      Serial.print("Response: ");        String s_info_response = clientReadCommandAlways.readStringUntil('!'); Serial.println(s_info_response);  // (!) fin
+      Serial.print("\n");
+    }
+    Serial.println("[INFO] TERMINE DE LEER LOS COMANDOS");
+    Serial.println("[INFO] VOY A LEER LOS PARAMETROS Y ACTUALIZAR MIS VARIABLES");
+    String s_ReadParameters = "/ciclado/"; s_ReadParameters += select_comlink; 
+    s_ReadParameters += "?usr=tesmater_cicla01&pwd=Diopma2203*"; s_ReadParameters += "&select=parameters";
+    s_ReadParameters += "&query=SELECT%20*%20FROM%20tesmater_ciclado01.parameters";
+    Serial.print("Requesting URL: ");Serial.println(s_ReadParameters);
+    clientReadParameters.print(String("GET ") + s_ReadParameters + " HTTP/1.1\r\n" +
+                  "Host: " + host + "\r\n" +
+                  "Connection: close\r\n\r\n");
+    unsigned long timeoutReadParams = millis();
+    while (clientReadParameters.available() == 0) {
+      if (millis() - timeoutReadParams > 10000) {
+        Serial.println(">>> Client Timeout !");
+        clientReadParameters.stop();
+        return;
+      }
+    }
+    while(clientReadParameters.available()) {
+      clientReadParameters.readStringUntil('&'); // (&) inicio
+      Serial.print("ID Parameter: ");     int_id_param = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_id_comm);
+      Serial.print("Status Parameter: "); String s_status_parameter = clientReadParameters.readStringUntil(';'); Serial.println(s_status_parameter);
+      Serial.print("Total cycles: ");     int_total_cycles = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_total_cycles);
+      Serial.print("Performed cycles: "); int_performed_cycles = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_performed_cycles);
+      Serial.print("Temp max cycles: ");  int_t_max_cycles = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t_max_cycles);
+      Serial.print("Temp min cycles: ");  int_t_min_cycles = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t_min_cycles);
+      Serial.print("Temp max HF: ");      int_t_max_hf = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t_max_hf);
+      Serial.print("Temp min HF: ");      int_t_min_hf = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t_min_hf);
+      Serial.print("Temp max CU: ");      int_t_max_cu = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t_max_cu);
+      Serial.print("Temp max TH4: ");     int_t4_max = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t4_max);
+      Serial.print("Temp min TH4: ");     int_t4_min = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_t4_min);
+      Serial.print("Tub position: ");     int_tub_position = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_tub_position); // NO UTIL
+      Serial.print("Tub time limit: ");   int_tub_time_limit = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_tub_time_limit); // NO SE QUE ES
+      Serial.print("Sampling time: ");    int_sampling_time = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_sampling_time);
+      Serial.print("Moving speed: ");     int_moving_speed = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_moving_speed);
+      Serial.print("Max white: ");        int_rgb_max_white = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_rgb_max_white);
+      Serial.print("Min white: ");        int_rgb_min_white = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_rgb_min_white);
+      Serial.print("Max black: ");        int_rgb_max_black = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_rgb_max_black);
+      Serial.print("Min black: ");        int_rgb_min_black = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_rgb_min_black);
+      Serial.print("Max color: ");        int_rgb_max_color = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_rgb_max_color);
+      Serial.print("Min color: ");        int_rgb_min_color = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_rgb_min_color);
+      Serial.print("Furnance: ");         int_furnance_power = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_furnance_power);
+      Serial.print("Fan: ");              int_fan_status = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_fan_status);
+      Serial.print("AirPump: ");          int_air_pump = clientReadParameters.readStringUntil(';').toInt(); Serial.println(int_air_pump);
+      Serial.print("Motor small step: ");   int_motor_small_step = clientReadParameters.readStringUntil('!').toInt(); Serial.println(int_motor_small_step);  // (!) fin
+      Serial.print("\n");
+      clientReadParameters.stop();
+    }
+    if(f_temp1 > int_t_min_hf){
+      // All switch here 
+    }
+    switch (int_id_comm)
+      {
+        /*
+        S_CYCLE
+        1. Activar Rele_Mufla y cambiar las variable int_furnance_power = 1 ...
+        2. Empezar a leer los TH-MAXs
+        3. Read RGB, mover el motor hasta encontrar la zona negra
+        4. LCD, Inicio del ciclo
+        5. Insertar temperaturas en la tabla "temperaturas", con poca frecuencia
+        6. Guardar los mismos datos de temperatura y estado en la SD (backup)
+        7. Actualizar "parameters" con las modificaciones que se hayan hecho: int_furnance_power, rgb..
+        8. Actualizar "commands" con execute = 1, y response = "un texto de ayuda de porque no se ha ejecutado"
+        9. Salir del estado y volver a leer command/orden. --> int_id_comm = 0
+        */
+        case S_CYCLE:
+        {
+          Serial.println("WE ARE CYCLING \n");
+          /* proceso 1 - mufla on - control de todos los reles*/
+          Serial.println("MUFLA ON! \n");
+          Serial.println("WARMING \n");
+          mufla(ON); fan1(OFF); fan2(OFF); air(OFF); general(OFF);
+          /* fin del proceso 1 */
+          /* proceso 2 - START MAXs */
+          Serial.print("TH Temp 1: "); f_temp1 = maxthermo1.readThermocoupleTemperature(); sprintf(buf_f1,"%f",f_temp1); Serial.println(f_temp1); 
+          Serial.print("TH Temp 2: "); f_temp2 = maxthermo2.readThermocoupleTemperature(); sprintf(buf_f2,"%f",f_temp2); Serial.println(f_temp2);  
+          Serial.print("TH Temp 3: "); f_temp3 = maxthermo3.readThermocoupleTemperature(); sprintf(buf_f3,"%f",f_temp3); Serial.println(f_temp3);  
+          Serial.print("TH Temp 4: "); f_temp4 = maxthermo4.readThermocoupleTemperature(); sprintf(buf_f4,"%f",f_temp4); Serial.println(f_temp4);  
+          faults();
+          delay(50);
+          /* fin del proceso 2 */
+          /* proceso 3, read RGB, faltara realizar la busqueda del color negro con el motor */
+          tcs.getRGB(&f_red, &f_green, &f_blue);
+          f_colorTemp = tcs.calculateColorTemperature(f_red, f_green, f_blue);
+          f_lux = tcs.calculateLux(f_red, f_green, f_blue);
+          Serial.print("R:"); Serial.println(int(f_red)); Serial.print("G:"); Serial.println(int(f_green)); Serial.print("B:"); Serial.println(int(f_blue)); Serial.print("\n");
+          Serial.print("Color en Temp Kelvin: "); Serial.println(f_colorTemp); Serial.print("Luxes: "); Serial.println(f_lux);
+          // cual es la cantidad de luxes que tenemos en la zona negra? y que color en temp Kelvin representa?
+          // una vez tengamos esto moveremos el motor hasta encontrar esta zona
+          /* fin del proceso 3 */
+          /* proceso 4, lcd welcome */
+          // ESTADO - Inicio del ciclo
+
+          /* fin del proceso 4 */
+          /* proceso 5, insert en la tabla temperatura */
+          // We now create a URI for the request
+          String s_insert_temp = "/ciclado/"; s_insert_temp += insert; s_insert_temp +="?option=temperature";
+          s_insert_temp += "&T1="; s_insert_temp += buf_f1;
+          s_insert_temp += "&T2="; s_insert_temp += buf_f2;
+          s_insert_temp += "&T3="; s_insert_temp += buf_f3;
+          s_insert_temp += "&T4="; s_insert_temp += buf_f4;
+          s_insert_temp += "&Estado="; s_insert_temp += "cicla";
+          Serial.print("Requesting URL: "); Serial.println(s_insert_temp);
+          // This will send the request to the server
+          clientInsertTemp.print(String("GET ") + s_insert_temp + " HTTP/1.1\r\n" +
+                        "Host: " + host + "\r\n" +
+                        "Connection: close\r\n\r\n");
+          unsigned long timeoutInsertTemp = millis();
+          while (clientInsertTemp.available() == 0) {
+              if (millis() - timeoutInsertTemp > 5000) {
+                  Serial.println(">>> Client Timeout !");
+                  clientInsertTemp.stop();
+                  return;
+              }
+          }
+          // Read the PHP for check the insert into DB --> "insert realizado"
+          while(clientInsertTemp.available()) {
+            clientInsertTemp.readStringUntil('&');
+            String line = clientInsertTemp.readStringUntil('!');
+            if(line != "Insert realizado"){
+              Serial.println("[ERROR] No se ha realizado el insert de las temperaturas");
+              // while (1); // halt!
+            }
+            Serial.print(line);
+          }
+          /* fin del proceso 5 */
+          /* proceso 6, send data to sd */
+          // NO SE SI SE REALIZARA
+
+          /* fin del proceso 6 */
+          /* proceso 7, update tabla parameters */
+          String urlUpdateParam1 = "/ciclado/"; urlUpdateParam1 += insert; urlUpdateParam1 +="?option=updateparams1";
+          urlUpdateParam1 += "&furnancepow="; urlUpdateParam1 += int_furnance_power; // mufla activada
+          urlUpdateParam1 += "&fan="; urlUpdateParam1 += int_fan_status; 
+          urlUpdateParam1 += "&airpump="; urlUpdateParam1 += int_air_pump;
+          urlUpdateParam1 += "&status="; urlUpdateParam1 += "cicla"; // estado
+          urlUpdateParam1 += "&maxblack="; urlUpdateParam1 += "100"; // posicion de la muestra
+          Serial.print("Requesting URL: "); Serial.println(urlUpdateParam1);
+          // This will send the request to the server
+          clientWakeParam.print(String("GET ") + urlUpdateParam1 + " HTTP/1.1\r\n" +
+                        "Host: " + host + "\r\n" +
+                        "Connection: close\r\n\r\n");
+          unsigned long timeoutWakeParam = millis();
+          while (clientWakeParam.available() == 0) {
+            if (millis() - timeoutWakeParam > 5000) {
+              Serial.println(">>> Client Timeout !");
+              clientWakeParam.stop();
+              return;
+            }
+          }
+          // Read the PHP for check the insert into DB --> "insert realizado"
+          while(clientWakeParam.available()) {
+            clientWakeParam.readStringUntil('&');
+            String line = clientWakeParam.readStringUntil('!');
+            if(line != "Insert realizado"){
+              Serial.println("[ERROR] No se ha realizado el insert de las temperaturas");
+              // while (1); // halt!
+            }
+            Serial.print(line);
+          }
+
+          /* proceso8, update tabla commands */
+
+          /* fin proceso 8 */
+
+          /* CONDICIONANTE */
+          int int_t_min_hf_th1 = f_temp1;
+          if (int_t_min_hf_th1 >= int_t_min_hf){ // esta condicion requiere que la mufla llegue a valores muy altos
+            // pasamos a calentar
+            // 1. mover la muestra hacia la zona de calentamiento
+            // 2. escribimos en commands --> ID = 2 (WARMING)
+            // 3. actualizar parametroas - nueva posición de la muestra
+            // 4. cambiar la varianle del switch --> int_id_comm = X, con esto conseguimos que vaya a leer la nueva orden
+          }
+          int_id_comm = 10;
+          /* exit */
+        } break;
+        /*
+        S_WARMING
+        Select execute,response from commands where id = 'int_id_comm'-1, si execute/response = 1, continuamos. De lo contrario printar ERROR.
+        LCD, mensaje de inicio más ayuda con los parametros que hay que introducir
+        Actualizar "commands" con execute = 1, y response = "un texto de ayuda de porque no se ha ejecutado"
+        */
+        case S_WARMING:
+        {
+          printf("Welcome to the system, let's get to start! \n");
+          int_id_comm = 3;
+          delay(500);
+        } break;
+        /*
+        S_COOLING
+        parametersin (el php ya se encarga de guardar los 4 datos en la BD o lo realiza el micro=
+        Cargamos los datos en nuestras variables: int_total_cycles, int_performed_cycles, int_t_max_cycles, int_t_min_cycles
+        Aplicar el algoritmo de control. (aplicarlo durante el numero de ciclos que haya metido el usuario)
+          Enviar datos en todo momento a la BD cada 10 segundos
+          Si la muestra supera la int_t_max_cycles
+            Activamos el ventilador de la mufla fria
+            Activamos la bomba de aire
+            Subimos la muestra hasta la zona negra (zona de enfriamiento)
+            LCD, enfriando la muestra
+            Actualizar "parameters": RGB, RELES, CYCLES...
+          Si la muestra es inferior a int_t_min_cycles
+            Bajamos la muestra hasta la zona blanca (zona de calentamiento)
+            Desactivamos el ventilador de la mufla fria
+            Desactivamos la bomba de aire
+            LCD, calentando la muestra
+            Actualizar "parameters": RGB, RELES, CYCLES...
+          Al acabar el numero de ciclos
+            Revisar que el RGB este en la franja negra (zona de enfriamiento)
+            Apagar apagar la mufla
+            Dejar el ventilador encendido durante 1 minuto
+            Actualizar "parameters": RGB, RELES, CYCLES...
+            Actualizar "commands" con execute = 1, y response = "un texto de ayuda de porque no se ha ejecutado"
+        */
+        case S_COOLING:
+        {
+          printf("Loading parameters into DB ... \n!"); // pensemos que tenemos que meter nosotros los parametros
+          int_id_comm = 4;
+        } break;
+        /*
+        S_END_OF_CYCLE
+        */
+        case S_END_OF_CYCLE:
+        {
+          printf("Loading parameters into DB ... \n!"); // pensemos que tenemos que meter nosotros los parametros
+          int_id_comm = 4;
+        } break;
+        /*
+        S_PAUSA
+        */
+        case S_PAUSA:
+        {
+          printf("Loading parameters into DB ... \n!"); // pensemos que tenemos que meter nosotros los parametros
+          int_id_comm = 4;
+        } break;
+        /*
+        S_CONTINUAR
+        */
+        case S_CONTINUAR:
+        {
+          printf("Loading parameters into DB ... \n!"); // pensemos que tenemos que meter nosotros los parametros
+          int_id_comm = 4;
+        } break;
+        default:{
+          int_id_comm = 0;
+        } break;
+    }
+  }
+
+  Serial.println();
+  Serial.println("closing connection");
+  delay(100);
+}
